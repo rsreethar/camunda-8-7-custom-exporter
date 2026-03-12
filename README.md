@@ -1,95 +1,87 @@
-# 🚀 Camunda 8.7 Custom Exporter
-Project Goal
-To address the Elasticsearch storage explosion in Camunda 8.7 production-like environments by implementing a "Selective Ingestion" strategy. This ensures that only business-critical variables (prefixed with X_) are indexed, reducing system noise and storage costs by up to 90%.
+**Camunda 8.7 Custom Exporter** - Storage Optimization POC
 
-## 📋 1. Prerequisites (The Environment)
-Before attempting the install, ensure your workstation meets these specs:
+Project Objective
+Address Elasticsearch storage exhaustion in Camunda 8.7 environments by implementing a "Selective Ingestion" strategy. This ensures only business-critical variables (prefixed with X_) are indexed, reducing system noise and storage costs by approximately 90%.
 
-OS: Windows 10/11 with PowerShell 5.1+.
+1. Environment Prerequisites
+OS: Windows 10/11 (PowerShell 5.1+)
 
-RAM: 16GB Minimum (8GB+ dedicated to Docker).
+Resources: 16GB RAM Minimum (8GB+ allocated to Docker)
 
-Tools:
+Container Runtime: Docker Desktop (Latest)
 
-Docker Desktop: Latest version.
+Orchestration: Kubectl v1.27+, Helm v3.12+ (Chart v12.8.1)
 
-Kubectl: v1.27+
+Build Tools: Java 17, Maven 3.8+
 
-Helm: v3.12+ (Specifically using Chart v12.8.1).
+IDE: IntelliJ IDEA (Recommended for Maven/K8s integration)
 
-Java 17 & Maven: For compiling the exporter.
+2. Build and Packaging
+The Java logic must be packaged and injected into the Kubernetes cluster.
 
-IDE: IntelliJ IDEA (Recommended for Maven/K8s integration).
-
-## 🏗️ 2. Before Installation: Build & Package
-We must turn our Java logic into a deployable asset.
-
-Build the JAR:
-
+Step 2.1: Build Executable JAR
 Bash
 mvn clean package
 Result: target/camunda-8-7-custom-exporter-1.0-SNAPSHOT.jar is generated.
 
-Inject into Kubernetes (The Permission Fix):
-Standard Init-Containers fail due to UID 1000 security constraints in Zeebe. We bypass this by creating a ConfigMap:
+Step 2.2: Kubernetes Injection (Security Workaround)
+Standard Init-Containers fail due to UID 1000 security constraints in Zeebe. We bypass this by projecting the JAR via a ConfigMap:
 
 PowerShell
 kubectl create configmap ups-custom-exporter-jar --from-file=target/camunda-8-7-custom-exporter-1.0-SNAPSHOT.jar
-## 🚀 3. Installation Steps
-We use Helm Chart 12.8.1 as it is the "Golden Version" that stably supports the 8.7 component suite.
-
-Add Repo:
+3. Deployment
+We use Helm Chart version 12.8.1 to ensure compatibility with the 8.7 component suite.
 
 Bash
 helm repo add camunda https://helm.camunda.io
 helm repo update
-Deploy via Master Profile:
 
-Bash
+# Deployment using the ConfigMap Mount Profile
 helm install poc camunda/camunda-platform --version 12.8.1 -f infra/values-configmap-mount.yaml
-## ⚙️ 4. Post-Installation Configuration & Troubleshooting
-The Optimize "Handshake" Issue
-Problem: Optimize 8.7 would fail with a 500 Error or an infinite redirect loop.
+4. Engineering Pivots and Resolutions
+Optimize OIDC Handshake
+Issue: Optimize 8.7 returns 500 errors or infinite redirect loops.
 
-Root Cause: 8.7 has a hard dependency on Identity/Keycloak for OIDC authentication.
+Root Cause: Hard dependency on Identity/Keycloak for authentication.
 
-The Fix: We explicitly enabled global.identity.auth.enabled: true and configured the internal Keycloak PostgreSQL passwords in the YAML to ensure the handshake succeeded.
+Resolution: Explicitly enabled global.identity.auth.enabled: true and synchronized PostgreSQL credentials in the Helm values to stabilize the handshake.
 
-The "Connection Refused" Fix
-The exporter cannot use localhost:9200. We manually injected the internal K8s service URL:
+The Security/Permission Barrier
+Issue: Exporter directory (/lib/custom) is owned by UID 1000; runtime copy via Init-Container (UID 0) fails.
+
+Resolution: Switched to Read-Only Volume Projection via ConfigMap. This provides the JAR to the pod without requiring elevated filesystem permissions.
+
+FEEL Expression Syntax
+Issue: Variable names with hyphens (e.g., X-id) fail math operations in 8.7 FEEL engine.
+
+Resolution: Migrated all business variables to Underscore notation (X_id).
+
+5. Validation and Evidence
+Step 5.1: Infrastructure Check
+Verify the exporter is loaded in the Zeebe logs:
 
 Bash
-kubectl set env statefulset/camunda-zeebe ZEEBE_BROKER_EXPORTERS_UPSCUSTOMEXPORTER_ARGS_URL="http://camunda-elasticsearch:9200"
-## 🔍 5. Validation & Testing
-Step 1: Port-Forwarding
-PowerShell
-kubectl port-forward svc/camunda-elasticsearch 9200
-Step 2: The Storage Proof
-Run this PowerShell command to compare indices:
+kubectl logs statefulset/camunda-zeebe | grep "UPS Custom Exporter"
+Step 5.2: Storage Verification (The "0-Byte" Test)
+Port-forward Elasticsearch (Port 9200) and execute:
 
 PowerShell
 Invoke-RestMethod -Uri "http://localhost:9200/_cat/indices/optimize-*?v"
-Success Criteria: * optimize-variable-update should show 0 documents (Default variables blocked).
+Expected Results:
+| Index | Documents | Result |
+| :--- | :--- | :--- |
+| optimize-variable-update | 0 | SUCCESS (System noise blocked) |
+| optimize-ups-filtered-data | > 0 | SUCCESS (Business data captured) |
 
-optimize-ups-filtered-data should show active documents (Filtered variables captured).
-
-## 🔄 6. Summary of Engineering Pivots (The "Why")
-Pivot Point	Issue Faced	Final Solution
-BPMN Variables	FEEL engine treats - as minus (math error).	Migrated all variables to Underscore (X_order_id).
-Security	Init-Container couldn't write to /lib/custom.	Switched to Read-Only Volume Projection (ConfigMap).
-8.8 vs 8.7	8.8 was unstable in low-RAM local clusters.	Downgraded to 8.7.24 for proven stability in POCs.
-Indexing	Standard exporter bloats Elasticsearch.	Overrode ElasticsearchExporter with custom Selective Ingestion logic.
-## 📂 7. Repository Hierarchy
-/src: Java Source code for the Custom Exporter.
+6. Repository Structure
+/src: Java Source for Selective Ingestion logic.
 
 /infra:
 
-values-configmap-mount.yaml (Current Master).
+values-configmap-mount.yaml: Primary deployment profile.
 
-values-init-container.yaml (Legacy Reference).
+values-init-container.yaml: Reference for failed security pivot.
 
-/models: Optimized BPMN sample file.
+/models: BPMN samples using underscore naming conventions.
 
-pom.xml: Maven build configuration.
-
-This is the complete research log. You have captured every technical detail and workaround. Would you like me to help you push this final version of the README to your repo now?
+pom.xml: Maven configuration for shading the exporter JAR.

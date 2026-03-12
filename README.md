@@ -1,237 +1,259 @@
-# 🚀 Camunda 8.7 Custom Exporter – Storage Optimization POC
+# 🚀 Camunda 8.7 Custom Exporter – Production‑Ready README
 
-## 1. Project Objective
-
-This project demonstrates a production‑validated Proof of Concept (POC) for addressing
-Elasticsearch storage explosion in **Camunda Platform 8.7 (Self‑Managed)** environments.
-
-The default Camunda Elasticsearch exporter indexes a large volume of system and runtime
-variables that are not business‑relevant. Over time, this leads to excessive index growth,
-higher storage costs, and operational overhead.
-
-This POC introduces a **Selective Ingestion Custom Exporter** that ensures **only
-business‑critical variables** are indexed.
-
-Filtering rule:
-- Only variables prefixed with `X_` are retained
-- All other variable records are discarded before indexing
-
-Outcome:
-- ~90% reduction in indexed variable volume
-- Predictable Elasticsearch growth
-- Clear separation of business vs system data
+Purpose: This README documents the exact working setup, commands, and failure recovery steps
+for running a custom Zeebe exporter on Camunda Platform 8.7 (Self‑Managed, Helm/Kubernetes).
+It is written so a new engineer can reproduce the setup without tribal knowledge.
 
 ---
 
-## 2. Scope and Assumptions
+## 1. Problem Statement
 
-This project is designed for:
+Camunda 8.7  default Elasticsearch exporter indexes all variables, including system and
+technical noise. Over time this causes:
 
-- Camunda Platform **8.7.x**
-- **Self‑Managed** deployments only
-- Kubernetes + Helm based installations
+- Rapid Elasticsearch index growth
+- Higher storage and operational costs
+- Slower Optimize queries
 
-Out of scope:
-- Camunda 8 SaaS (custom exporters are not supported)
-- Camunda 8 Run (local lightweight runtime)
-- Camunda 7
+This project introduces a custom Zeebe exporter that:
 
----
-
-## 3. Architecture Overview
-
-This solution replaces the default Elasticsearch exporter behavior by introducing
-a custom exporter at the **Zeebe broker level**.
-
-High‑level flow:
-
-Zeebe Broker  
-→ Exporter API  
-→ Custom Variable Filter (`X_` prefix)  
-→ Elasticsearch (custom indices)
-
-Key characteristics:
-- Exporter processes **all Zeebe records**
-- Filtering logic is applied inside the exporter
-- Non‑matching records are dropped before indexing
-- Exporter is loaded **during Zeebe startup**
-- Misconfiguration will cause broker startup failure (expected behavior)
+- Intercepts Zeebe records
+- Filters variables by a defined rule (example: business variables only)
+- Delegates persistence to Elasticsearch using Camunda’s exporter APIs
 
 ---
 
-## 4. Environment Prerequisites
+## 2. Supported Scope
 
-Ensure the following environment is available before setup:
+- ✅ Camunda Platform 8.7.x (Self‑Managed)
+- ✅ Kubernetes (Helm chart 12.8.1)
+- ✅ Custom Java exporter packaged as a JAR
 
-- Operating System: Windows 10 / 11
-- PowerShell: 5.1 or later
-- Memory: 16 GB RAM minimum
-  - At least 8 GB allocated to Docker
-- Container Runtime: Docker Desktop (latest)
-- Kubernetes Tooling:
-  - kubectl v1.27+
-  - Helm v3.12+
-- Camunda Helm Chart: v12.8.1
-- Build Tools:
-  - Java 17
-  - Maven 3.8+
-- IDE (optional): IntelliJ IDEA
+- ❌ Camunda SaaS
+- ❌ Camunda Run
+- ❌ Camunda 7
 
 ---
 
-## 5. Repository Structure
+## 3. High‑Level Architecture
+
+    Zeebe Broker
+       |
+       |-- Default Elasticsearch Exporter (system records)
+       |
+       `-- UpsCustomExporter (business‑filtered records)
+              |
+              `-- Elasticsearch
+
+Key points:
+
+- Exporters are loaded at Zeebe startup
+- A misconfigured exporter will crash the broker (expected behavior)
+- Zeebe retries exporter failures automatically
+
+---
+
+## 4. Repository Structure
 
     camunda-8-7-custom-exporter/
-    ├── src/
-    │   └── main/java/com/ups/camunda/poc
-    │       └── Custom Exporter implementation
+    ├── src/main/java/com/ups/camunda/poc/
+    │   └── UpsCustomExporter.java
+    ├── pom.xml
     ├── infra/
-    │   ├── values-configmap-mount.yaml   # ✅ Primary working Helm values
-    │   └── values-init-container.yaml    # ❌ Legacy approach (permission failure)
-    ├── models/
-    │   └── BPMN samples using underscore variable naming
+    │   └── values.yaml
     ├── scripts/
-    │   ├── deploy-poc.ps1                # End-to-end deployment automation
-    │   └── verify-storage.ps1            # Elasticsearch verification
-    ├── pom.xml                           # Maven build and shading configuration
-    └── README.md                         # Project documentation
+    │   └── verify-elasticsearch.ps1
+    └── README.md
 
 ---
 
-## 6. Build and Packaging
+## 5. Build the Exporter JAR
 
-The exporter is implemented as a Java JAR and injected into the Zeebe broker at runtime.
-
-### 6.1 Build Executable JAR
-
-Run the following command from the project root:
+From the project root:
 
     mvn clean package
 
-Expected output artifact:
+Expected output:
 
-    target/camunda-8-7-custom-exporter-1.0-SNAPSHOT.jar
-
----
-
-## 7. Kubernetes Injection Strategy (Security Constraint)
-
-### Problem
-
-- Zeebe containers run as **UID 1000**
-- Standard init‑containers run as **UID 0**
-- Writing to Zeebe directories from init‑containers fails
-- Results in startup and permission errors
-
-### Solution
-
-Instead of copying the JAR at runtime, the exporter is injected using a
-**read‑only ConfigMap volume projection**.
-
-Create the ConfigMap:
-
-    kubectl create configmap ups-custom-exporter-jar ^
-      --from-file=target/camunda-8-7-custom-exporter-1.0-SNAPSHOT.jar
-
-This avoids filesystem ownership conflicts entirely.
+    target/ups-custom-exporter-poc-1.0-SNAPSHOT.jar
 
 ---
 
-## 8. Zeebe Exporter Configuration
+## 6. Mount the Exporter JAR into Zeebe (MANDATORY)
 
-The exporter is configured via Helm values in:
+Zeebe does not scan /lib/custom automatically. The JAR must be:
 
-    infra/values-configmap-mount.yaml
+1. Mounted into the container
+2. Explicitly referenced via JARPATH
 
-Key concepts:
-- Exporter ID must be unique
-- Exporter class name must match the Java implementation
-- JAR path must reference the mounted ConfigMap
-- Any validation failure will prevent Zeebe startup
+### 6.1 Create / Update ConfigMap
 
-This is expected and ensures early failure detection.
+    kubectl create configmap ups-custom-exporter-jar \
+      --from-file=target/ups-custom-exporter-poc-1.0-SNAPSHOT.jar \
+      -o yaml --dry-run=client | kubectl apply -f -
 
----
+### 6.2 Verify Mount Inside Pod
 
-## 9. Deployment
+    kubectl exec camunda-zeebe-0 -- ls /usr/local/zeebe/lib/custom
 
-### 9.1 Add Camunda Helm Repository
+Expected:
 
-    helm repo add camunda https://helm.camunda.io
-    helm repo update
-
-### 9.2 Install Camunda Platform
-
-    helm install poc camunda/camunda-platform ^
-      --version 12.8.1 ^
-      -f infra/values-configmap-mount.yaml
+    ups-custom-exporter-poc-1.0-SNAPSHOT.jar
 
 ---
 
-## 10. Engineering Pivots and Resolutions
+## 7. Enable the Custom Exporter (CRITICAL STEP)
 
-| Area | Issue | Resolution |
-|----|------|-----------|
-| Optimize Auth | 500 errors / redirect loops | Enabled `global.identity.auth.enabled: true` |
-| Security | UID 0 → UID 1000 write failure | Switched to ConfigMap projection |
-| BPMN / FEEL | Hyphen treated as minus operator | Migrated variables to underscore (`X_id`) |
-| Indexing | Excessive Elasticsearch growth | Custom Selective Ingestion exporter |
+Both CLASSNAME and JARPATH are required. Missing either will crash Zeebe.
 
----
+    kubectl set env statefulset/camunda-zeebe \
+      ZEEBE_BROKER_EXPORTERS_UPSCUSTOMEXPORTERPOC_CLASSNAME=com.ups.camunda.poc.UpsCustomExporter \
+      ZEEBE_BROKER_EXPORTERS_UPSCUSTOMEXPORTERPOC_JARPATH=/usr/local/zeebe/lib/custom/ups-custom-exporter-poc-1.0-SNAPSHOT.jar
 
-## 11. Validation and Evidence
+Restart Zeebe to apply:
 
-### 11.1 Exporter Load Verification
-
-Verify exporter initialization in Zeebe logs:
-
-    kubectl logs statefulset/camunda-zeebe | findstr "UPS Custom Exporter"
-
-Presence of log entry confirms exporter loading.
+    kubectl delete pod camunda-zeebe-0
 
 ---
 
-### 11.2 Storage Verification (0‑Byte Test)
+## 8. Elasticsearch Connectivity (Required for Startup Stability)
 
-Execute:
+Ensure Zeebe exporters can reach Elasticsearch:
 
-    Invoke-RestMethod -Uri "http://localhost:9200/_cat/indices/optimize-*?v"
+    kubectl set env statefulset/camunda-zeebe \
+      ZEEBE_BROKER_EXPORTERS_UPSCUSTOMEXPORTERPOC_ARGS_ELASTICSEARCH_URL=http://camunda-elasticsearch:9200
 
-Expected behavior:
+Important notes:
 
-- optimize-variable-update
-  - 0 documents (system noise blocked)
-- optimize-ups-filtered-data
-  - Business variables present
-
----
-
-## 12. Customization Guidance
-
-You can adapt this POC by:
-
-- Changing the variable prefix logic in exporter code
-- Adding additional record‑type filters
-- Modifying index naming strategies
-- Extending exporter logic to forward data to other sinks
+- During cluster startup, Elasticsearch may be running but not ready
+- Initial Connection refused errors are expected and retried automatically
 
 ---
 
-## 13. Common Failure Scenarios
+## 9. Verification Checklist
 
-- Zeebe pod fails to start
-  → Exporter validation or configuration issue
-- No data in Elasticsearch
-  → Exporter not loaded or filter too restrictive
-- Optimize UI returns 500 errors
-  → Identity / auth misconfiguration
+### 9.1 Pod Health
+
+    kubectl get pods
+    kubectl describe pod camunda-zeebe-0
+
+Expected:
+
+- READY: 1/1
+- No restart loops
+
+### 9.2 Exporter JAR Loaded
+
+    kubectl exec camunda-zeebe-0 -- ls /usr/local/zeebe/lib/custom
+
+### 9.3 Exporter Execution
+
+    kubectl logs camunda-zeebe-0 | findstr UpsCustomExporter
+
+Presence of stack traces referencing UpsCustomExporter.export() confirms execution.
 
 ---
 
-## 14. Final Checklist
+## 10. Known Error Messages and How to Fix Them
 
-- Build JAR successfully
-- Create ConfigMap before Helm install
-- Use `values-configmap-mount.yaml`
-- Verify exporter logs
-- Verify Elasticsearch indices
+### Error: ClassNotFoundException
+
+    Failed to load exporter with configuration
+    ExporterCfg{ jarPath='null', className='com.ups.camunda.poc.UpsCustomExporter' }
+
+Cause:
+- JARPATH not set or incorrect
+
+Fix:
+
+    kubectl set env statefulset/camunda-zeebe \
+      ZEEBE_BROKER_EXPORTERS_UPSCUSTOMEXPORTERPOC_JARPATH=/usr/local/zeebe/lib/custom/ups-custom-exporter-poc-1.0-SNAPSHOT.jar
+
+---
+
+### Error: Connection refused (Elasticsearch)
+
+    ElasticsearchExporterException: Failed to put component template
+    Caused by: java.net.ConnectException: Connection refused
+
+Cause:
+- Elasticsearch not yet ready
+- Incorrect service URL
+
+Fix:
+
+    kubectl get svc camunda-elasticsearch
+
+Then wait for readiness (Zeebe retries automatically).
+
+---
+
+### Error: Helm upgrade volumeMount not found
+
+    volumeMounts[].name: Not found: "zeebe-lib-share"
+
+Cause:
+- Volume name mismatch between volumes and volumeMounts
+
+Fix:
+- Ensure volume and mount names match exactly in values.yaml
+
+---
+
+### Error: Duplicate environment variables (Helm + kubectl)
+
+Cause:
+- Repeated kubectl set env combined with Helm upgrades
+
+Fix (cleanup first):
+
+    kubectl set env statefulset/camunda-zeebe ZEEBE_BROKER_EXPORTERS_UPSCUSTOMEXPORTERPOC_CLASSNAME-
+    kubectl set env statefulset/camunda-zeebe ZEEBE_BROKER_EXPORTERS_UPSCUSTOMEXPORTERPOC_JARPATH-
+
+    helm upgrade camunda camunda/camunda-platform -f values.yaml --version 12.8.1
+
+---
+
+## 11. PowerShell vs Linux Shell Warning (IMPORTANT)
+
+Do NOT paste Zeebe container startup logs into PowerShell.
+
+Examples that will fail in PowerShell:
+
+    export VAR=value
+    ls /exporters
+    echo "No exporters available"
+
+These are Linux shell traces, not PowerShell commands.
+
+---
+
+## 12. Why This Design Works
+
+- ConfigMap avoids UID and permission issues
+- Explicit JARPATH avoids classpath ambiguity
+- Zeebe exporter retry model handles transient Elasticsearch outages
+- Fail-fast startup prevents silent data loss
+
+---
+
+## 13. Final Working State (Reference)
+
+- Zeebe image: camunda/zeebe:8.7.24
+- Helm chart: camunda-platform 12.8.1
+- Exporter JAR mounted at: /usr/local/zeebe/lib/custom
+- Exporter class: com.ups.camunda.poc.UpsCustomExporter
+- Zeebe pod status: READY = True
+
+---
+
+## 14. Next Enhancements
+
+- Add exporter metrics
+- Add variable-level allow/deny rules
+- Split indices per business domain
+- Add ILM policies for exporter indices
+
+---
+
+This README reflects the real, battle-tested setup that is currently working.

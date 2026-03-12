@@ -1,14 +1,16 @@
 # 🚀 Camunda 8.7 Custom Exporter – Production‑Ready README
 
-Purpose: This README documents the exact working setup, commands, and failure recovery steps
+Purpose:
+This README documents the exact working setup, commands, and failure recovery steps
 for running a custom Zeebe exporter on Camunda Platform 8.7 (Self‑Managed, Helm/Kubernetes).
-It is written so a new engineer can reproduce the setup without tribal knowledge.
+It is written so a new engineer can reproduce the setup without tribal knowledge and
+understand why certain standard approaches do NOT work.
 
 ---
 
 ## 1. Problem Statement
 
-Camunda 8.7  default Elasticsearch exporter indexes all variables, including system and
+Camunda 8’s default Elasticsearch exporter indexes all variables, including system and
 technical noise. Over time this causes:
 
 - Rapid Elasticsearch index growth
@@ -60,7 +62,8 @@ Key points:
     │   └── UpsCustomExporter.java
     ├── pom.xml
     ├── infra/
-    │   └── values.yaml
+    │   ├── values-configmap-mount.yaml     (WORKING – used by this POC)
+    │   └── values-init-container.yaml      (ENTERPRISE STANDARD – does NOT work for Zeebe)
     ├── scripts/
     │   └── verify-elasticsearch.ps1
     └── README.md
@@ -79,20 +82,53 @@ Expected output:
 
 ---
 
-## 6. Mount the Exporter JAR into Zeebe (MANDATORY)
+## 6. Why the Init‑Container Approach DOES NOT Work (CRITICAL)
 
-Zeebe does not scan /lib/custom automatically. The JAR must be:
+In many enterprise Kubernetes standards, custom binaries are injected using
+an init‑container that copies files into a shared volume.
 
-1. Mounted into the container
-2. Explicitly referenced via JARPATH
+This approach FAILS for Zeebe.
 
-### 6.1 Create / Update ConfigMap
+### Root Cause
+
+- Zeebe containers run as **non‑root user (UID 1000)**
+- Init‑containers typically run as **root (UID 0)**
+- Files copied by init‑containers are owned by root
+- Zeebe is **not allowed** to read or execute those files
+
+Result:
+
+- Zeebe startup fails
+- Exporter validation fails
+- Pod enters crash loop
+
+This is a **platform‑level security constraint**, not a configuration bug.
+
+The file `values-init-container.yaml` is kept only as a reference to this
+enterprise‑wide pattern, but it MUST NOT be used for Zeebe exporters.
+
+---
+
+## 7. Working Strategy: ConfigMap‑Based JAR Projection (MANDATORY)
+
+The ONLY reliable approach for Zeebe is:
+
+- Package exporter as a JAR
+- Project it into the container using a **read‑only ConfigMap**
+- Avoid filesystem ownership changes entirely
+
+Zeebe does not scan `/lib/custom` automatically.
+The JAR must be mounted AND explicitly referenced.
+
+---
+
+## 8. Create / Update ConfigMap
 
     kubectl create configmap ups-custom-exporter-jar \
       --from-file=target/ups-custom-exporter-poc-1.0-SNAPSHOT.jar \
       -o yaml --dry-run=client | kubectl apply -f -
 
-### 6.2 Verify Mount Inside Pod
+Verify mount inside the pod:
 
     kubectl exec camunda-zeebe-0 -- ls /usr/local/zeebe/lib/custom
 
@@ -102,9 +138,10 @@ Expected:
 
 ---
 
-## 7. Enable the Custom Exporter (CRITICAL STEP)
+## 9. Enable the Custom Exporter (CRITICAL STEP)
 
-Both CLASSNAME and JARPATH are required. Missing either will crash Zeebe.
+Both CLASSNAME and JARPATH are required.
+Missing either will crash Zeebe at startup.
 
     kubectl set env statefulset/camunda-zeebe \
       ZEEBE_BROKER_EXPORTERS_UPSCUSTOMEXPORTERPOC_CLASSNAME=com.ups.camunda.poc.UpsCustomExporter \
@@ -116,7 +153,7 @@ Restart Zeebe to apply:
 
 ---
 
-## 8. Elasticsearch Connectivity (Required for Startup Stability)
+## 10. Elasticsearch Connectivity (Startup Stability)
 
 Ensure Zeebe exporters can reach Elasticsearch:
 
@@ -125,100 +162,91 @@ Ensure Zeebe exporters can reach Elasticsearch:
 
 Important notes:
 
-- During cluster startup, Elasticsearch may be running but not ready
-- Initial Connection refused errors are expected and retried automatically
+- Elasticsearch may be Running but not Ready during startup
+- Initial Connection refused errors are expected
+- Zeebe exporter retries automatically
 
 ---
 
-## 9. Verification Checklist
+## 11. Verification Checklist
 
-### 9.1 Pod Health
+### Pod Health
 
     kubectl get pods
     kubectl describe pod camunda-zeebe-0
 
 Expected:
-
 - READY: 1/1
 - No restart loops
 
-### 9.2 Exporter JAR Loaded
+### Exporter JAR Loaded
 
     kubectl exec camunda-zeebe-0 -- ls /usr/local/zeebe/lib/custom
 
-### 9.3 Exporter Execution
+### Exporter Execution
 
     kubectl logs camunda-zeebe-0 | findstr UpsCustomExporter
 
-Presence of stack traces referencing UpsCustomExporter.export() confirms execution.
+Presence of UpsCustomExporter.export() confirms execution.
 
 ---
 
-## 10. Known Error Messages and How to Fix Them
+## 12. Known Errors and Fixes
 
-### Error: ClassNotFoundException
+### ClassNotFoundException
 
-    Failed to load exporter with configuration
     ExporterCfg{ jarPath='null', className='com.ups.camunda.poc.UpsCustomExporter' }
 
 Cause:
-- JARPATH not set or incorrect
+- JARPATH missing or incorrect
 
 Fix:
-
-    kubectl set env statefulset/camunda-zeebe \
-      ZEEBE_BROKER_EXPORTERS_UPSCUSTOMEXPORTERPOC_JARPATH=/usr/local/zeebe/lib/custom/ups-custom-exporter-poc-1.0-SNAPSHOT.jar
+- Re‑apply exporter env vars
 
 ---
 
-### Error: Connection refused (Elasticsearch)
-
-    ElasticsearchExporterException: Failed to put component template
-    Caused by: java.net.ConnectException: Connection refused
+### Connection refused (Elasticsearch)
 
 Cause:
-- Elasticsearch not yet ready
-- Incorrect service URL
+- Elasticsearch not ready yet
 
 Fix:
+- Wait for readiness
+- Verify service:
 
     kubectl get svc camunda-elasticsearch
 
-Then wait for readiness (Zeebe retries automatically).
-
 ---
 
-### Error: Helm upgrade volumeMount not found
-
-    volumeMounts[].name: Not found: "zeebe-lib-share"
+### volumeMount not found
 
 Cause:
-- Volume name mismatch between volumes and volumeMounts
+- Volume name mismatch in Helm values
 
 Fix:
-- Ensure volume and mount names match exactly in values.yaml
+- Ensure volume and volumeMount names match exactly
 
 ---
 
-### Error: Duplicate environment variables (Helm + kubectl)
+### Duplicate env vars (Helm + kubectl)
 
 Cause:
 - Repeated kubectl set env combined with Helm upgrades
 
-Fix (cleanup first):
+Fix:
 
     kubectl set env statefulset/camunda-zeebe ZEEBE_BROKER_EXPORTERS_UPSCUSTOMEXPORTERPOC_CLASSNAME-
     kubectl set env statefulset/camunda-zeebe ZEEBE_BROKER_EXPORTERS_UPSCUSTOMEXPORTERPOC_JARPATH-
 
-    helm upgrade camunda camunda/camunda-platform -f values.yaml --version 12.8.1
+    helm upgrade camunda camunda/camunda-platform -f values-configmap-mount.yaml --version 12.8.1
 
 ---
 
-## 11. PowerShell vs Linux Shell Warning (IMPORTANT)
+## 13. PowerShell vs Linux Shell Warning
 
 Do NOT paste Zeebe container startup logs into PowerShell.
 
-Examples that will fail in PowerShell:
+Examples that will fail:
 
     export VAR=value
     ls /exporters
@@ -228,16 +256,7 @@ These are Linux shell traces, not PowerShell commands.
 
 ---
 
-## 12. Why This Design Works
-
-- ConfigMap avoids UID and permission issues
-- Explicit JARPATH avoids classpath ambiguity
-- Zeebe exporter retry model handles transient Elasticsearch outages
-- Fail-fast startup prevents silent data loss
-
----
-
-## 13. Final Working State (Reference)
+## 14. Final Working State
 
 - Zeebe image: camunda/zeebe:8.7.24
 - Helm chart: camunda-platform 12.8.1
@@ -247,7 +266,7 @@ These are Linux shell traces, not PowerShell commands.
 
 ---
 
-## 14. Next Enhancements
+## 15. Next Enhancements
 
 - Add exporter metrics
 - Add variable-level allow/deny rules
@@ -256,4 +275,5 @@ These are Linux shell traces, not PowerShell commands.
 
 ---
 
-This README reflects the real, battle-tested setup that is currently working.
+This README documents the ONLY approach that works reliably for Zeebe exporters
+under enterprise Kubernetes security constraints.

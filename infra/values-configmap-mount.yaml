@@ -1,0 +1,77 @@
+# FULL MASTER CONFIGURATION FOR CAMUNDA 8.7 STORAGE OPTIMIZATION
+global:
+  image:
+    tag: 8.7.23
+  identity:
+    auth:
+      enabled: true  # CRITICAL: Fixes Optimize 500 error / OIDC Handshake
+
+# Disable heavy components not needed for the Storage POC
+operate: { enabled: false }
+tasklist: { enabled: false }
+connectors: { enabled: false }
+
+identityKeycloak:
+  enabled: true
+  postgresql:
+    enabled: true
+    auth:
+      password: "admin123"
+      postgresPassword: "admin123"
+
+identity:
+  enabled: true
+
+zeebe:
+  clusterSize: 1
+  partitionCount: 1
+  replicationFactor: 1
+  image:
+    tag: 8.7.24
+    
+  # --- THE INJECTION LOGIC ---
+  # Replaces the failed Init-Container approach
+  extraVolumes:
+    - name: exporter-jar-vol
+      configMap:
+        name: ups-custom-exporter-jar
+  
+  extraVolumeMounts:
+    - name: exporter-jar-vol
+      mountPath: /usr/local/zeebe/lib/custom/
+  
+  env:
+    # 1. Standard ES Connection for Zeebe
+    - name: ZEEBE_BROKER_EXPORTERS_ELASTICSEARCH_ARGS_URL
+      value: "http://camunda-elasticsearch:9200"
+    
+    # 2. Custom Exporter Activation
+    # REPLACES standard exporter logic with our Selective Ingestion class
+    - name: ZEEBE_BROKER_EXPORTERS_UPSCUSTOMEXPORTER_CLASSNAME
+      value: "com.ups.camunda.poc.UpsCustomExporter"
+    - name: ZEEBE_BROKER_EXPORTERS_UPSCUSTOMEXPORTER_JARPATH
+      value: "/usr/local/zeebe/lib/custom/camunda-8-7-custom-exporter-1.0-SNAPSHOT.jar"
+    
+    # 3. Custom Exporter Arguments (Passed to super.configure)
+    - name: ZEEBE_BROKER_EXPORTERS_UPSCUSTOMEXPORTER_ARGS_URL
+      value: "http://camunda-elasticsearch:9200"
+    - name: ZEEBE_BROKER_EXPORTERS_UPSCUSTOMEXPORTER_ARGS_INDEX_PREFIX
+      value: "optimize-ups-filtered-data"
+
+optimize:
+  enabled: true
+  image:
+    tag: 8.7.0
+  # Directs Optimize to read only our filtered data
+  zeebeIndexPrefix: "optimize-ups-filtered-data"
+  env:
+    - name: CAMUNDA_OPTIMIZE_ELASTICSEARCH_CONNECTION_NODES
+      value: "camunda-elasticsearch:9200"
+
+elasticsearch:
+  master:
+    replicaCount: 1
+    persistence: { enabled: false }
+    resources:
+      requests: { memory: "2Gi" }
+      limits: { memory: "4Gi" }

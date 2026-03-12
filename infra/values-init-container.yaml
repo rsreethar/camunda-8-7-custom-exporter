@@ -1,0 +1,55 @@
+# PHASE 1: INIT-CONTAINER APPROACH (Legacy/Security Reference)
+global:
+  image:
+    tag: 8.7.23
+  identity:
+    auth:
+      enabled: true
+
+# Same resource-saving profile as the master
+operate: { enabled: false }
+tasklist: { enabled: false }
+connectors: { enabled: false }
+
+zeebe:
+  clusterSize: 1
+  partitionCount: 1
+  replicationFactor: 1
+  image: { tag: 8.7.24 }
+
+  # --- THE INIT-CONTAINER ATTEMPT ---
+  # This failed in production due to UID 1000 permission constraints
+  initContainers:
+    - name: download-exporter-jar
+      image: busybox:latest
+      command: 
+        - sh
+        - -c
+        - |
+          # Attempting to download the JAR from a remote repository
+          wget -O /usr/local/zeebe/lib/custom/camunda-8-7-custom-exporter-1.0-SNAPSHOT.jar http://your-repo-url/exporter.jar
+      volumeMounts:
+        - name: custom-lib
+          mountPath: /usr/local/zeebe/lib/custom/
+
+  # --- THE CONFIGURATION ---
+  env:
+    - name: ZEEBE_BROKER_EXPORTERS_UPSCUSTOMEXPORTER_CLASSNAME
+      value: "com.ups.camunda.poc.UpsCustomExporter"
+    - name: ZEEBE_BROKER_EXPORTERS_UPSCUSTOMEXPORTER_ARGS_URL
+      value: "http://camunda-elasticsearch:9200"
+    - name: ZEEBE_BROKER_EXPORTERS_UPSCUSTOMEXPORTER_ARGS_INDEX_PREFIX
+      value: "optimize-ups-filtered-data"
+
+optimize:
+  enabled: true
+  image: { tag: 8.7.0 }
+  zeebeIndexPrefix: "optimize-ups-filtered-data"
+
+elasticsearch:
+  master:
+    replicaCount: 1
+    persistence: { enabled: false }
+    resources:
+      requests: { memory: "2Gi" }
+      limits: { memory: "4Gi" }

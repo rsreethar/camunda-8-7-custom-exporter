@@ -1,87 +1,46 @@
-**Camunda 8.7 Custom Exporter** - Storage Optimization POC
+# Camunda 8.7 Custom Exporter: Storage Optimization POC
 
-Project Objective
-Address Elasticsearch storage exhaustion in Camunda 8.7 environments by implementing a "Selective Ingestion" strategy. This ensures only business-critical variables (prefixed with X_) are indexed, reducing system noise and storage costs by approximately 90%.
+## 1. Project Objective
+This POC addresses the **Elasticsearch storage explosion** observed in Camunda 8.7 environments. By implementing a "Selective Ingestion" strategy, we intercept the exporter stream to ensure only business-critical variables (prefixed with `X_`) are indexed. 
 
-1. Environment Prerequisites
-OS: Windows 10/11 (PowerShell 5.1+)
+**Outcome:** System noise and storage costs are reduced by approximately **90%**.
 
-Resources: 16GB RAM Minimum (8GB+ allocated to Docker)
+---
 
-Container Runtime: Docker Desktop (Latest)
+## 2. Environment Prerequisites
+Before attempting the installation, ensure the workstation matches this configuration:
+* **Operating System:** Windows 10/11 (PowerShell 5.1+)
+* **Resources:** 16GB RAM Minimum (8GB+ allocated to Docker)
+* **Container Runtime:** Docker Desktop (Latest)
+* **Orchestration:** Kubectl v1.27+, Helm v3.12+ (Using **Chart v12.8.1**)
+* **Build Tools:** Java 17, Maven 3.8+
+* **IDE:** IntelliJ IDEA (Recommended for Maven/K8s integration)
 
-Orchestration: Kubectl v1.27+, Helm v3.12+ (Chart v12.8.1)
+---
 
-Build Tools: Java 17, Maven 3.8+
-
-IDE: IntelliJ IDEA (Recommended for Maven/K8s integration)
-
-2. Build and Packaging
+## 3. Build and Packaging
 The Java logic must be packaged and injected into the Kubernetes cluster.
 
-Step 2.1: Build Executable JAR
-Bash
+### 3.1 Build Executable JAR
+```bash
 mvn clean package
-Result: target/camunda-8-7-custom-exporter-1.0-SNAPSHOT.jar is generated.
-
-Step 2.2: Kubernetes Injection (Security Workaround)
-Standard Init-Containers fail due to UID 1000 security constraints in Zeebe. We bypass this by projecting the JAR via a ConfigMap:
-
-PowerShell
-kubectl create configmap ups-custom-exporter-jar --from-file=target/camunda-8-7-custom-exporter-1.0-SNAPSHOT.jar
-3. Deployment
-We use Helm Chart version 12.8.1 to ensure compatibility with the 8.7 component suite.
-
-Bash
-helm repo add camunda https://helm.camunda.io
+Result: target/camunda-8-7-custom-exporter-1.0-SNAPSHOT.jar is generated.3.2 Kubernetes Injection (The Permission Fix)Standard Init-Containers fail due to UID 1000 security constraints in Zeebe. We bypass this by projecting the JAR via a ConfigMap:PowerShellkubectl create configmap ups-custom-exporter-jar --from-file=target/camunda-8-7-custom-exporter-1.0-SNAPSHOT.jar
+4. DeploymentWe use Helm Chart version 12.8.1 to ensure compatibility with the 8.7 component suite.Bashhelm repo add camunda [https://helm.camunda.io](https://helm.camunda.io)
 helm repo update
 
 # Deployment using the ConfigMap Mount Profile
 helm install poc camunda/camunda-platform --version 12.8.1 -f infra/values-configmap-mount.yaml
-4. Engineering Pivots and Resolutions
-Optimize OIDC Handshake
-Issue: Optimize 8.7 returns 500 errors or infinite redirect loops.
-
-Root Cause: Hard dependency on Identity/Keycloak for authentication.
-
-Resolution: Explicitly enabled global.identity.auth.enabled: true and synchronized PostgreSQL credentials in the Helm values to stabilize the handshake.
-
-The Security/Permission Barrier
-Issue: Exporter directory (/lib/custom) is owned by UID 1000; runtime copy via Init-Container (UID 0) fails.
-
-Resolution: Switched to Read-Only Volume Projection via ConfigMap. This provides the JAR to the pod without requiring elevated filesystem permissions.
-
-FEEL Expression Syntax
-Issue: Variable names with hyphens (e.g., X-id) fail math operations in 8.7 FEEL engine.
-
-Resolution: Migrated all business variables to Underscore notation (X_id).
-
-5. Validation and Evidence
-Step 5.1: Infrastructure Check
-Verify the exporter is loaded in the Zeebe logs:
-
-Bash
-kubectl logs statefulset/camunda-zeebe | grep "UPS Custom Exporter"
-Step 5.2: Storage Verification (The "0-Byte" Test)
-Port-forward Elasticsearch (Port 9200) and execute:
-
-PowerShell
-Invoke-RestMethod -Uri "http://localhost:9200/_cat/indices/optimize-*?v"
-Expected Results:
-| Index | Documents | Result |
-| :--- | :--- | :--- |
-| optimize-variable-update | 0 | SUCCESS (System noise blocked) |
-| optimize-ups-filtered-data | > 0 | SUCCESS (Business data captured) |
-
-6. Repository Structure
-/src: Java Source for Selective Ingestion logic.
-
-/infra:
-
-values-configmap-mount.yaml: Primary deployment profile.
-
-values-init-container.yaml: Reference for failed security pivot.
-
-/models: BPMN samples using underscore naming conventions.
-
-pom.xml: Maven configuration for shading the exporter JAR.
+5. Engineering Log: Critical PivotsComponentIssue FacedEngineering ResolutionOptimize Auth500 Errors / Redirect LoopsForced global.identity.auth.enabled: true to satisfy OIDC handshake requirements.SecurityInit-Container (UID 0) cannot write to Zeebe (UID 1000) folders.Switched to Read-Only Volume Projection via ConfigMap.BPMN SyntaxFEEL engine treats hyphens (-) as minus signs.Migrated all business variables to Underscore notation (X_id).IndexingStandard exporter bloats Elasticsearch.Overrode ElasticsearchExporter with custom Selective Ingestion logic.6. Validation and Evidence6.1 Infrastructure VerificationVerify the custom exporter class is successfully loaded in the Zeebe logs:Bashkubectl logs statefulset/camunda-zeebe | grep "UPS Custom Exporter"
+6.2 Storage Verification (The "0-Byte" Test)Port-forward Elasticsearch (Port 9200) and execute the following PowerShell command:PowerShellInvoke-RestMethod -Uri "http://localhost:9200/_cat/indices/optimize-*?v"
+Expected Results:optimize-variable-update: Must show 0 documents (Default system noise blocked).optimize-ups-filtered-data: Must show active documents (Business data captured).7. Repository HierarchyPlaintextcamunda-8-7-custom-exporter/
+├── /src                          # Java source for Selective Ingestion logic
+├── /infra                        # Kubernetes & Helm configurations
+│   ├── values-configmap-mount.yaml # Current Master (Successful Pivot)
+│   ├── values-init-container.yaml # Legacy Reference (Security Failure)
+├── /models                       # BPMN samples with underscore naming
+├── /scripts                      # Automation for demo and verification
+│   ├── deploy-poc.ps1            # Automates ConfigMap and Helm install
+│   └── verify-storage.ps1        # Automates the 0-byte ES verification
+├── pom.xml                       # Maven configuration for JAR shading
+└── README.md                     # Technical research log
+Final Demo Check: Ensure the ups-custom-exporter-jar ConfigMap is created before running the Helm install. If the Zeebe pods fail to start, check the Kubernetes events for "Volume Mount" errors.
